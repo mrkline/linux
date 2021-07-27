@@ -28,11 +28,13 @@ static u32 iomap_read_reg(struct m_can_classdev *cdev, int reg)
 	return readl(priv->base + reg);
 }
 
-static u32 iomap_read_fifo(struct m_can_classdev *cdev, int offset)
+static int iomap_read_fifo(struct m_can_classdev *cdev, int offset, void *val, size_t val_count)
 {
 	struct m_can_plat_priv *priv = cdev_to_priv(cdev);
 
-	return readl(priv->mram_base + offset);
+	ioread32_rep(priv->mram_base + offset, val, val_count);
+
+	return 0;
 }
 
 static int iomap_write_reg(struct m_can_classdev *cdev, int reg, int val)

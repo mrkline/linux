@@ -319,13 +319,15 @@ static inline void m_can_write(struct m_can_classdev *cdev, enum m_can_reg reg,
 	cdev->ops->write_reg(cdev, reg, val);
 }
 
-static u32 m_can_fifo_read(struct m_can_classdev *cdev,
-			   u32 fgi, unsigned int offset)
+static void m_can_fifo_read(struct m_can_classdev *cdev,
+			    u32 fgi, unsigned int offset, void *val, size_t val_count)
 {
+	u32 result;
 	u32 addr_offset = cdev->mcfg[MRAM_RXF0].off + fgi * RXF0_ELEMENT_SIZE +
 		offset;
 
-	return cdev->ops->read_fifo(cdev, addr_offset);
+	result = cdev->ops->read_fifo(cdev, addr_offset, val, val_count);
+	WARN_ON(result != 0);
 }
 
 static void m_can_fifo_write(struct m_can_classdev *cdev,
@@ -345,10 +347,13 @@ static inline void m_can_fifo_write_no_off(struct m_can_classdev *cdev,
 
 static u32 m_can_txe_fifo_read(struct m_can_classdev *cdev, u32 fgi, u32 offset)
 {
+	u32 val, result;
 	u32 addr_offset = cdev->mcfg[MRAM_TXE].off + fgi * TXE_ELEMENT_SIZE +
 		offset;
 
-	return cdev->ops->read_fifo(cdev, addr_offset);
+	result = cdev->ops->read_fifo(cdev, addr_offset, &val, 1);
+	WARN_ON(result != 0);
+	return val;
 }
 
 static inline bool m_can_tx_fifo_full(struct m_can_classdev *cdev)
@@ -460,13 +465,17 @@ static void m_can_read_fifo(struct net_device *dev, u32 rxfs)
 	struct m_can_classdev *cdev = netdev_priv(dev);
 	struct canfd_frame *cf;
 	struct sk_buff *skb;
+	u32 id_and_dlc[2];
 	u32 id, fgi, dlc;
 	u32 timestamp = 0;
-	int i;
 
 	/* calculate the fifo get index for where to read data */
 	fgi = FIELD_GET(RXFS_FGI_MASK, rxfs);
-	dlc = m_can_fifo_read(cdev, fgi, M_CAN_FIFO_DLC);
+
+	m_can_fifo_read(cdev, fgi, M_CAN_FIFO_ID, id_and_dlc, ARRAY_SIZE(id_and_dlc));
+	id = id_and_dlc[0];
+	dlc = id_and_dlc[1];
+
 	if (dlc & RX_BUF_FDF)
 		skb = alloc_canfd_skb(dev, &cf);
 	else
@@ -481,7 +490,6 @@ static void m_can_read_fifo(struct net_device *dev, u32 rxfs)
 	else
 		cf->len = can_cc_dlc2len((dlc >> 16) & 0x0F);
 
-	id = m_can_fifo_read(cdev, fgi, M_CAN_FIFO_ID);
 	if (id & RX_BUF_XTD)
 		cf->can_id = (id & CAN_EFF_MASK) | CAN_EFF_FLAG;
 	else
@@ -498,10 +506,7 @@ static void m_can_read_fifo(struct net_device *dev, u32 rxfs)
 		if (dlc & RX_BUF_BRS)
 			cf->flags |= CANFD_BRS;
 
-		for (i = 0; i < cf->len; i += 4)
-			*(u32 *)(cf->data + i) =
-				m_can_fifo_read(cdev, fgi,
-						M_CAN_FIFO_DATA(i / 4));
+		m_can_fifo_read(cdev, fgi, M_CAN_FIFO_DATA(0), cf->data, DIV_ROUND_UP(cf->len, 4));
 	}
 
 	/* acknowledge rx fifo 0 */
