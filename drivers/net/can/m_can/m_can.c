@@ -278,7 +278,7 @@ enum m_can_reg {
 /* Message RAM Elements */
 #define M_CAN_FIFO_ID		0x0
 #define M_CAN_FIFO_DLC		0x4
-#define M_CAN_FIFO_DATA(n)	(0x8 + ((n) << 2))
+#define M_CAN_FIFO_DATA		0x8
 
 /* Rx Buffer Element */
 /* R0 */
@@ -331,18 +331,20 @@ static void m_can_fifo_read(struct m_can_classdev *cdev,
 }
 
 static void m_can_fifo_write(struct m_can_classdev *cdev,
-			     u32 fpi, unsigned int offset, u32 val)
+			     u32 fpi, unsigned int offset, const void *val, size_t val_count)
 {
 	u32 addr_offset = cdev->mcfg[MRAM_TXB].off + fpi * TXB_ELEMENT_SIZE +
 		offset;
+	int result;
 
-	cdev->ops->write_fifo(cdev, addr_offset, val);
+	result = cdev->ops->write_fifo(cdev, addr_offset, val, val_count);
+	WARN_ON(result != 0);
 }
 
 static inline void m_can_fifo_write_no_off(struct m_can_classdev *cdev,
 					   u32 fpi, u32 val)
 {
-	cdev->ops->write_fifo(cdev, fpi, val);
+	cdev->ops->write_fifo(cdev, fpi, &val, 1);
 }
 
 static u32 m_can_txe_fifo_read(struct m_can_classdev *cdev, u32 fgi, u32 offset)
@@ -506,7 +508,7 @@ static void m_can_read_fifo(struct net_device *dev, u32 rxfs)
 		if (dlc & RX_BUF_BRS)
 			cf->flags |= CANFD_BRS;
 
-		m_can_fifo_read(cdev, fgi, M_CAN_FIFO_DATA(0), cf->data, DIV_ROUND_UP(cf->len, 4));
+		m_can_fifo_read(cdev, fgi, M_CAN_FIFO_DATA, cf->data, DIV_ROUND_UP(cf->len, 4));
 	}
 
 	/* acknowledge rx fifo 0 */
@@ -1546,8 +1548,8 @@ static netdev_tx_t m_can_tx_handler(struct m_can_classdev *cdev)
 	struct net_device *dev = cdev->net;
 	struct sk_buff *skb = cdev->tx_skb;
 	u32 id, cccr, fdflags;
-	int i;
 	int putidx;
+	u32 id_and_dlc[2];
 
 	cdev->tx_skb = NULL;
 
@@ -1563,18 +1565,16 @@ static netdev_tx_t m_can_tx_handler(struct m_can_classdev *cdev)
 	if (cf->can_id & CAN_RTR_FLAG)
 		id |= TX_BUF_RTR;
 
+	id_and_dlc[0] = id;
+
 	if (cdev->version == 30) {
 		netif_stop_queue(dev);
 
-		/* message ram configuration */
-		m_can_fifo_write(cdev, 0, M_CAN_FIFO_ID, id);
-		m_can_fifo_write(cdev, 0, M_CAN_FIFO_DLC,
-				 can_fd_len2dlc(cf->len) << 16);
+		id_and_dlc[1] = can_fd_len2dlc(cf->len) << 16;
 
-		for (i = 0; i < cf->len; i += 4)
-			m_can_fifo_write(cdev, 0,
-					 M_CAN_FIFO_DATA(i / 4),
-					 *(u32 *)(cf->data + i));
+		/* Write the frame ID, DLC, and payload to the FIFO element. */
+		m_can_fifo_write(cdev, 0, M_CAN_FIFO_ID, id_and_dlc, ARRAY_SIZE(id_and_dlc));
+		m_can_fifo_write(cdev, 0, M_CAN_FIFO_DATA, cf->data, DIV_ROUND_UP(cf->len, 4));
 
 		can_put_echo_skb(skb, dev, 0, 0);
 
@@ -1618,8 +1618,11 @@ static netdev_tx_t m_can_tx_handler(struct m_can_classdev *cdev)
 		/* get put index for frame */
 		putidx = FIELD_GET(TXFQS_TFQPI_MASK,
 				   m_can_read(cdev, M_CAN_TXFQS));
-		/* Write ID Field to FIFO Element */
-		m_can_fifo_write(cdev, putidx, M_CAN_FIFO_ID, id);
+
+		/* Construct the DLC Field, with CAN-FD configuration.
+		 * Use the put index of fifo as message the marker,
+		 * used in the TX interrupt for sending the correct echo frame.
+		 */
 
 		/* get CAN FD configuration of frame */
 		fdflags = 0;
@@ -1628,21 +1631,13 @@ static netdev_tx_t m_can_tx_handler(struct m_can_classdev *cdev)
 			if (cf->flags & CANFD_BRS)
 				fdflags |= TX_BUF_BRS;
 		}
+		id_and_dlc[1] = FIELD_PREP(TX_BUF_MM_MASK, putidx) |
+				 FIELD_PREP(TX_BUF_DLC_MASK, can_fd_len2dlc(cf->len)) |
+				 fdflags | TX_BUF_EFC;
 
-		/* Construct DLC Field. Also contains CAN-FD configuration
-		 * use put index of fifo as message marker
-		 * it is used in TX interrupt for
-		 * sending the correct echo frame
-		 */
-		m_can_fifo_write(cdev, putidx, M_CAN_FIFO_DLC,
-				 FIELD_PREP(TX_BUF_MM_MASK, putidx) |
-				 FIELD_PREP(TX_BUF_DLC_MASK,
-					    can_fd_len2dlc(cf->len)) |
-				 fdflags | TX_BUF_EFC);
-
-		for (i = 0; i < cf->len; i += 4)
-			m_can_fifo_write(cdev, putidx, M_CAN_FIFO_DATA(i / 4),
-					 *(u32 *)(cf->data + i));
+		/* Write the frame ID, DLC, and payload to the FIFO element. */
+		m_can_fifo_write(cdev, putidx, M_CAN_FIFO_ID, id_and_dlc, ARRAY_SIZE(id_and_dlc));
+		m_can_fifo_write(cdev, 0, M_CAN_FIFO_DATA, cf->data, DIV_ROUND_UP(cf->len, 4));
 
 		/* Push loopback echo.
 		 * Will be looped back on TX interrupt based on message marker

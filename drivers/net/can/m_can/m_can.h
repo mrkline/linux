@@ -66,7 +66,7 @@ struct m_can_ops {
 	int (*write_reg)(struct m_can_classdev *cdev, int reg, int val);
 	int (*read_fifo)(struct m_can_classdev *cdev, int addr_offset, void *val, size_t val_count);
 	int (*write_fifo)(struct m_can_classdev *cdev, int addr_offset,
-			  int val);
+			  const void *val, size_t val_count);
 	int (*init)(struct m_can_classdev *cdev);
 };
 

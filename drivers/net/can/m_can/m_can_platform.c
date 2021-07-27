@@ -46,11 +46,12 @@ static int iomap_write_reg(struct m_can_classdev *cdev, int reg, int val)
 	return 0;
 }
 
-static int iomap_write_fifo(struct m_can_classdev *cdev, int offset, int val)
+static int iomap_write_fifo(struct m_can_classdev *cdev, int offset,
+			    const void *val, size_t val_count)
 {
 	struct m_can_plat_priv *priv = cdev_to_priv(cdev);
 
-	writel(val, priv->mram_base + offset);
+	iowrite32_rep(priv->base + offset, val, val_count);
 
 	return 0;
 }
